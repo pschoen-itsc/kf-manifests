@@ -7,6 +7,7 @@ resources:
 - service.yaml
 - deployment.yaml
 - composite-controller.yaml
+- controller-sa.yaml
 configMapGenerator:
 - name: kubeflow-pipelines-profile-controller-code
   files:

@@ -17,6 +17,7 @@ spec:
           operator: In
           values:
           - istio-system
+          - kubeflow
     - podSelector: {}
   podSelector:
     matchExpressions:

@@ -11,11 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+import random
+import ssl
+import string
+import urllib.request
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 import base64
+from urllib.error import HTTPError
 
 
 def main():
@@ -27,7 +32,7 @@ def main():
 def get_settings_from_env(controller_port=None,
                           visualization_server_image=None, frontend_image=None,
                           visualization_server_tag=None, frontend_tag=None, disable_istio_sidecar=None,
-                          minio_access_key=None, minio_secret_key=None, kfp_default_pipeline_root=None):
+                          kfp_default_pipeline_root=None):
     """
     Returns a dict of settings from environment variables relevant to the controller
 
@@ -74,14 +79,6 @@ def get_settings_from_env(controller_port=None,
         disable_istio_sidecar if disable_istio_sidecar is not None \
             else os.environ.get("DISABLE_ISTIO_SIDECAR") == "true"
 
-    settings["minio_access_key"] = \
-        minio_access_key or \
-        base64.b64encode(bytes(os.environ.get("MINIO_ACCESS_KEY"), 'utf-8')).decode('utf-8')
-
-    settings["minio_secret_key"] = \
-        minio_secret_key or \
-        base64.b64encode(bytes(os.environ.get("MINIO_SECRET_KEY"), 'utf-8')).decode('utf-8')
-
     # KFP_DEFAULT_PIPELINE_ROOT is optional
     settings["kfp_default_pipeline_root"] = \
         kfp_default_pipeline_root or \
@@ -90,10 +87,48 @@ def get_settings_from_env(controller_port=None,
     return settings
 
 
+class SimpleK8sClient:
+
+
+    def __init__(self):
+        self.host = os.environ.get("KUBERNETES_SERVICE_HOST")
+        self.port = int(os.environ.get("KUBERNETES_SERVICE_PORT_HTTPS"))
+        self.token = open("/var/run/secrets/kubernetes.io/serviceaccount/token").read()
+        self.ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLSv1_2)
+        self.ssl_context.load_verify_locations(
+            cafile="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        )
+
+    def request(self, path, method, data=None, headers=None):
+        if not headers:
+            headers = {}
+        base_headers = {"Authorization": f"Bearer {self.token}"}
+        headers.update(base_headers)
+        req = urllib.request.Request(
+            urllib.parse.urljoin(f"https://{self.host}:{self.port}/", path),
+            data=data,
+            method=method,
+            headers=headers
+        )
+        try:
+            with urllib.request.urlopen(req, context=self.ssl_context) as resp:
+                return json.loads(resp.read().decode())
+        except HTTPError as e:
+            if e.code == 404:
+                return None
+            print(e.code, e.read())
+            return None
+
+    def get(self, path):
+        return self.request(path, "GET")
+
+    def post(self, path, data):
+        return self.request(path, "POST", json.dumps(data).encode(), headers={"Content-Type": "application/json"})
+
+
 def server_factory(visualization_server_image,
                    visualization_server_tag, frontend_image, frontend_tag,
-                   disable_istio_sidecar, minio_access_key,
-                   minio_secret_key, kfp_default_pipeline_root=None,
+                   disable_istio_sidecar, kfp_default_pipeline_root=None,
                    url="", controller_port=8080):
     """
     Returns an HTTPServer populated with Handler with customized settings
@@ -108,6 +143,51 @@ def server_factory(visualization_server_image,
 
             if pipeline_enabled != "true":
                 return {"status": {}, "children": []}
+
+            k8s_client = SimpleK8sClient()
+            existing_secret = k8s_client.get(f"/api/v1/namespaces/{namespace}/secrets/mlpipeline-minio-artifact")
+            if not existing_secret:
+                minio_access_key = namespace
+                chars = string.ascii_lowercase + string.digits
+                minio_secret_key = "".join(random.choice(chars) for _ in range(32))
+                seaweed_config_pod_spec = {
+                    "apiVersion": "v1",
+                    "kind": "Pod",
+                    "metadata": {
+                        "name": f"seaweedfs-config-{namespace}",
+                        "namespace": "kubeflow",
+                    },
+                    "spec": {
+                        "containers": [
+                            {
+                                "name": "seaweedfs-config",
+                                "image": f"chrislusf/seaweedfs:3.69",
+                                "args": [
+                                    "shell",
+                                    "s3.configure",
+                                    f"-user {minio_access_key}",
+                                    f"-access_key {minio_access_key}",
+                                    f"-secret_key {minio_secret_key}",
+                                    f"-actions Read,Write,List",
+                                    "-apply",
+                                ],
+                                "env": [{
+                                    "name": "SHELL_FILER",
+                                    "value": "minio-service.kubeflow.svc.cluster.local:8888"
+                                }, {
+                                    "name": "SHELL_MASTER",
+                                    "value": "minio-service.kubeflow.svc.cluster.local:9333"
+                                }]
+                            }
+                        ],
+                        "serviceAccountName": "seaweedfs",
+                        "restartPolicy": "Never",
+                    }
+                }
+                k8s_client.post("/api/v1/namespaces/kubeflow/pods", seaweed_config_pod_spec)
+            else:
+                minio_access_key = existing_secret["data"]["accesskey"]
+                minio_secret_key = existing_secret["data"]["secretkey"]
 
             desired_configmap_count = 1
             desired_resources = []
@@ -371,8 +451,8 @@ def server_factory(visualization_server_image,
                     "namespace": namespace,
                 },
                 "data": {
-                    "accesskey": minio_access_key,
-                    "secretkey": minio_secret_key,
+                    "accesskey": base64.b64encode(minio_access_key.encode()).decode(),
+                    "secretkey": base64.b64encode(minio_secret_key.encode()).decode(),
                 },
             })
 

@@ -9,5 +9,17 @@ spec:
     port: 9000
     protocol: TCP
     targetPort: 8333
+  - name: filer
+    port: 8888
+    protocol: TCP
+  - name: filer-grpc
+    port: 18888
+    protocol: TCP
+  - name: master
+    port: 9333
+    protocol: TCP
+  - name: master-grpc
+    port: 19333
+    protocol: TCP
   selector:
     app: seaweedfs

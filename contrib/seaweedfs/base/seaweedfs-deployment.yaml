@@ -15,18 +15,25 @@ spec:
   replicas: 1
   template:
     metadata:
+      #annotations:
+      #  sidecar.istio.io/inject: "false"
       labels:
         app: seaweedfs
     spec:
       containers:
       - name: seaweedfs
-        image: 'chrislusf/seaweedfs:3.69'
+        image: 'chrislusf/seaweedfs:3.82'
         args:
         - 'server'
         - '-dir=/data'
         - '-s3'
+        - '-iam'
         ports:
         - containerPort: 8333
+        - containerPort: 8888
+        - containerPort: 9333
+        - containerPort: 18888
+        - containerPort: 19333
         readinessProbe:
           httpGet:
             path: /status
@@ -63,3 +70,4 @@ spec:
       - name: data
         persistentVolumeClaim:
           claimName: seaweedfs-pvc
+      serviceAccountName: seaweedfs
